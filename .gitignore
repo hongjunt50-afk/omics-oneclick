@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+build/
+dist/
+*.egg-info/
+workspace/
+results/
+OmicsOne_Results/
+*.spec.bak
+.DS_Store
+Thumbs.db
