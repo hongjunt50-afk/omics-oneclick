@@ -6,7 +6,7 @@ import json
 import threading
 import time
 import traceback
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
@@ -50,7 +50,10 @@ class AnalysisConfig:
     wgcna_min_module: int = 30
     wgcna_power: float | None = None
     heatmap_top: int = 60
+    top_variable_n: int = 1000
     seed: int = 20260101
+    # 分析结束后把结果目录整理成课程/项目提交材料包（28 项 + 参数表 + 文字稿）
+    export_submission: bool = False
 
 
 @dataclass
@@ -149,13 +152,24 @@ class Runner:
 
         # 1. 质控 + 标准化
         self._step(0.05, "质控与标准化")
+        if groups is not None:
+            # 分组表本身也是一份交付物：提交材料里要求 sample/group 两列
+            sample_cols = [str(c) for c in expr.columns]
+            lookup = {str(k): v for k, v in groups.items()}
+            self._write_table(
+                "00_sample_group",
+                pd.DataFrame({"group": [lookup.get(c) for c in sample_cols]}, index=pd.Index(sample_cols, name="sample")),
+            )
         qc = sample_qc(expr)
         for note in qc.notes:
             self._note("INFO", note)
         self._write_table("01_sample_qc", qc.stats.set_index("sample"))
         self._write_table("02_sample_correlation", qc.correlation)
         self._write_figure("qc_boxplot", plotting.qc_boxplot(expr, self.fig_dir / "01_样本表达分布.png"))
-        self._write_figure("qc_heatmap", plotting.qc_correlation_plot(qc.correlation, self.fig_dir / "02_样本相关性.png"))
+        self._write_figure(
+            "qc_heatmap",
+            plotting.qc_correlation_plot(qc.correlation, self.fig_dir / "02_样本相关性.png", groups=groups),
+        )
 
         expr_norm, norm_note = standardize(expr, self.config.normalization)
         if self.config.normalization != "none":
@@ -163,6 +177,23 @@ class Runner:
             self._write_table("03_normalized_expression", expr_norm)
             self._write_figure(
                 "qc_boxplot_norm", plotting.qc_boxplot(expr_norm, self.fig_dir / "03_标准化后表达分布.png")
+            )
+
+        # 高变基因选择记录：WGCNA 内部按方差取 Top N，交付材料里要求把这张挑选表留痕
+        top_n = max(int(self.config.top_variable_n), 1)
+        variance = expr_norm.var(axis=1).sort_values(ascending=False)
+        top_var = variance.head(top_n)
+        if not top_var.empty:
+            self._write_table(
+                "04_top_variable_genes",
+                pd.DataFrame(
+                    {
+                        "rank": range(1, len(top_var) + 1),
+                        "variance": top_var.to_numpy(),
+                        "mean_log2_expr": expr_norm.mean(axis=1).reindex(top_var.index).to_numpy(),
+                    },
+                    index=pd.Index(top_var.index.astype(str), name="gene"),
+                ),
             )
         self.result.summary["qc"] = {
             "samples": expr.shape[1],
@@ -378,10 +409,14 @@ class Runner:
                     )
 
                 hub_frames = []
+                indicator = self._group_indicator(groups, comparisons, expr_norm)
                 for module in wgcna.module_summary()["module"]:
                     hub = wgcna.hub_genes(module, expr_norm, top=30)
                     if not hub.empty:
                         hub.insert(0, "module", module)
+                        if indicator is not None:
+                            # GS：基因表达与「比较组 A」指示变量的 Pearson r，MM 已是 kME
+                            hub["GS"] = [self._trait_corr(expr_norm, gene, indicator) for gene in hub["gene"]]
                         hub_frames.append(hub)
                 if hub_frames:
                     self._write_table("55_WGCNA_hub_genes", pd.concat(hub_frames).set_index(["module", "gene"]))
@@ -397,6 +432,8 @@ class Runner:
         elapsed = time.time() - started
         self._step(0.92, "生成报告")
         self.result.summary["elapsed_seconds"] = round(elapsed, 1)
+        # 参数快照：提交材料包/复现记录要能只凭结果目录重建，不能只留在 GUI 内存里
+        self.result.summary["params"] = self._config_snapshot()
         self._note("INFO", f"全部完成，用时 {elapsed:.1f} 秒")
 
         log_path = self.project_dir / "run_log.txt"
@@ -409,6 +446,43 @@ class Runner:
         return self.result
 
     # ---------- 辅助 ----------
+    def _config_snapshot(self) -> dict:
+        """落进 summary.json 的参数快照（JSON 友好）。"""
+        snap = asdict(self.config)
+        snap["output_dir"] = str(self.config.output_dir)
+        snap["run_source"] = Path(self.dataset.source).name if self.dataset.source else ""
+        snap["run_genes"] = self.dataset.n_genes
+        snap["run_samples"] = self.dataset.n_samples
+        snap["run_log2_transformed"] = bool(self.dataset.log2_transformed)
+        snap["run_groups"] = (
+            {str(k): int(v) for k, v in self.dataset.groups.value_counts().items()}
+            if self.dataset.groups is not None
+            else {}
+        )
+        return snap
+
+    def _group_indicator(self, groups, comparisons, expr) -> pd.Series | None:
+        """把比较组 A 编成 0/1 向量，供 hub 表的 GS 列使用。"""
+        if groups is None or not comparisons:
+            return None
+        target = str(comparisons[0][0])
+        lookup = {str(k): str(v) for k, v in groups.items()}
+        values = [lookup.get(str(c)) for c in expr.columns]
+        if any(v is None for v in values) or len(set(values)) < 2:
+            return None
+        return pd.Series([1.0 if v == target else 0.0 for v in values], index=[str(c) for c in expr.columns])
+
+    @staticmethod
+    def _trait_corr(expr: pd.DataFrame, gene: str, indicator: pd.Series) -> float:
+        try:
+            x = expr.loc[gene].to_numpy(dtype=float)
+        except KeyError:
+            return float("nan")
+        y = indicator.to_numpy(dtype=float)
+        if x.size != y.size or np.nanstd(x) == 0:
+            return float("nan")
+        return float(np.corrcoef(x, y)[0, 1])
+
     def _resolve_comparisons(self, groups: pd.Series | None) -> list[tuple[str, str]]:
         if self.config.comparisons:
             return list(self.config.comparisons)

@@ -12,3 +12,17 @@ OmicsOne_Results/
 *.spec.bak
 .DS_Store
 Thumbs.db
+
+# 数据与产出：真实表达矩阵、材料包、下载缓存一律不进仓库
+geo_data/
+downloads/
+*.csv.gz
+*.log
+.pytest_cache/
+.idea/
+.vscode/
+
+# 一次性脚本（绑定某次课程提交的数据与编号，已被 app/core/submission.py 取代，只留本机）
+tools/make_submission_pack.py
+tools/make_report_assets.py
+tools/norm_fig.py

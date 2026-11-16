@@ -400,9 +400,26 @@ class MainWindow(QMainWindow):
         self.perm_spin.setValue(1000)
         self.perm_spin.setFixedWidth(90)
 
+        heat_caption = QLabel("热图基因数")
+        heat_caption.setObjectName("SectionLabel")
+        self.heatmap_spin = QSpinBox()
+        self.heatmap_spin.setRange(10, 200)
+        self.heatmap_spin.setSingleStep(10)
+        self.heatmap_spin.setValue(50)
+        self.heatmap_spin.setFixedWidth(80)
+        self.heatmap_spin.setToolTip("差异基因聚类热图取前 N 个；提交材料通常要求 Top50")
+
+        self.pack_check = QCheckBox("导出提交材料包（28 项）")
+        self.pack_check.setChecked(True)
+        self.pack_check.setToolTip(
+            "分析完成后把结果目录整理成 28 项编号材料 + 参数表 + 文字稿 + 自检清单，\n"
+            "写到结果目录的「提交材料」子目录"
+        )
+
         for widget in (
             padj_caption, self.padj_spin, lfc_caption, self.lfc_spin,
             norm_caption, self.norm_combo, perm_caption, self.perm_spin,
+            heat_caption, self.heatmap_spin, self.pack_check,
         ):
             option_row.addWidget(widget)
         option_row.addStretch(1)
@@ -463,8 +480,13 @@ class MainWindow(QMainWindow):
         self.folder_result_btn = QPushButton("打开结果目录")
         self.folder_result_btn.setEnabled(False)
         self.folder_result_btn.clicked.connect(self._open_result_folder)
+        self.pack_btn = QPushButton("打开提交材料")
+        self.pack_btn.setEnabled(False)
+        self.pack_btn.setToolTip("打开结果目录下的「提交材料」子目录（28 项编号材料 + 参数表 + 文字稿）")
+        self.pack_btn.clicked.connect(self._open_pack)
         result_row.addWidget(self.report_btn)
         result_row.addWidget(self.folder_result_btn)
+        result_row.addWidget(self.pack_btn)
         progress_card.body_layout.addLayout(result_row)
         layout.addWidget(progress_card)
 
@@ -592,10 +614,11 @@ class MainWindow(QMainWindow):
             "OmicsOne_<项目名>_<时间戳>/\n"
             "├── 分析报告.html        自包含报告（图片内嵌，可直接发人）\n"
             "├── 分析概览.md          一页纸摘要\n"
-            "├── summary.json        机器可读结果\n"
+            "├── summary.json        机器可读结果（含参数快照）\n"
             "├── run_log.txt         完整运行日志\n"
             "├── figures/            全部图表 PNG（火山图、热图、PCA、富集、GSEA、WGCNA）\n"
-            "└── tables/             全部结果表 CSV（UTF-8 BOM，Excel 双击可开）"
+            "├── tables/             全部结果表 CSV（UTF-8 BOM，Excel 双击可开）\n"
+            "└── 提交材料/           28 项编号材料 + 参数表 + 文字稿 + 自检清单（可选）"
         )
         tree.setStyleSheet(
             f"color:{theme.TEXT_DIM}; font-family:Consolas, monospace; font-size:12px;"
@@ -646,6 +669,8 @@ class MainWindow(QMainWindow):
         self.preview_btn.setEnabled(has_data)
         self.report_btn.setEnabled(bool(self.last_report))
         self.folder_result_btn.setEnabled(self.last_result is not None)
+        self.pack_btn.setEnabled(self._pack_dir() is not None)
+        self.pack_check.setEnabled(not busy)
         self.stop_btn.setEnabled(busy)
         self.pause_btn.setEnabled(busy)
         for widget in (self.upload_btn, self.url_btn, self.folder_btn, self.import_local_btn,
@@ -929,6 +954,8 @@ class MainWindow(QMainWindow):
             normalization=self.norm_combo.currentData(),
             gsea_permutations=self.perm_spin.value(),
             run_wgcna=self.checkboxes["wgcna"].isChecked(),
+            heatmap_top=self.heatmap_spin.value(),
+            export_submission=self.pack_check.isChecked(),
         )
 
     def _run_one_click(self) -> None:
@@ -1025,6 +1052,9 @@ class MainWindow(QMainWindow):
         self.result_label.setText(f"结果已写入：{result.project_dir}")
         self._log("SUCCESS", f"分析完成，结果目录 {result.project_dir}")
         self._log("INFO", f"HTML 报告：{Path(report).name}")
+        pack_dir = self._pack_dir()
+        if pack_dir is not None:
+            self._log("INFO", f"提交材料包：{pack_dir}")
         if result.summary.get("elapsed_seconds"):
             self._log("INFO", f"总用时 {result.summary['elapsed_seconds']} 秒，产出图表 {len(result.figures)} 张")
         if result.errors:
@@ -1084,6 +1114,26 @@ class MainWindow(QMainWindow):
     def _open_result_folder(self) -> None:
         if self.last_result is not None:
             open_folder(self.last_result.project_dir)
+
+    def _pack_dir(self) -> Path | None:
+        """最近一次结果里的提交材料目录（没有就返回 None）。"""
+        if self.last_result is None:
+            return None
+        candidate = Path(self.last_result.project_dir) / "提交材料"
+        return candidate if candidate.exists() else None
+
+    def _open_pack(self) -> None:
+        pack_dir = self._pack_dir()
+        if pack_dir is not None:
+            open_folder(pack_dir)
+        else:
+            QMessageBox.information(
+                self,
+                "没有提交材料包",
+                "本机结果目录里没有「提交材料」子目录。\n\n"
+                "勾选「导出提交材料包（28 项）」后重新运行；"
+                "或在项目目录执行 python tools/build_pack.py <结果目录> 单独补出材料包。",
+            )
 
     def _export_log(self) -> None:
         text = self.log_panel.text() + "\n" + self.one_click_log.text()

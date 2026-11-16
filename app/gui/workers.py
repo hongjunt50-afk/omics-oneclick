@@ -102,6 +102,19 @@ class AnalysisWorker(QThread):
             result = self._runner.run_all(self.steps)
             self.progress.emit(0.95, "生成 HTML 报告")
             report = build_report(result, self.dataset, self.config)
+            if self.config.export_submission:
+                # 材料包只是结果目录的再整理，失败不应把整次分析判死
+                self.progress.emit(0.97, "整理提交材料包")
+                try:
+                    from ..core.submission import build_submission_pack
+
+                    pack = build_submission_pack(
+                        result.project_dir,
+                        heatmap_top=self.config.heatmap_top,
+                    )
+                    self.log.emit("INFO", f"提交材料包：{pack.out_dir}（{pack.summary_line()}）")
+                except Exception as exc:  # noqa: BLE001
+                    self.log.emit("ERROR", f"提交材料包生成失败：{exc}")
             self.finished_ok.emit(result, str(report))
         except Cancelled:
             self.failed.emit("已终止")

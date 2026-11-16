@@ -103,10 +103,13 @@ def heatmap_plot(
     title: str = "差异基因聚类热图",
     max_genes: int = 60,
     cluster_samples: bool = True,
+    stats: pd.DataFrame | None = None,
 ) -> Path:
-    from scipy.cluster.hierarchy import dendrogram, linkage
-    from scipy.spatial.distance import pdist, squareform
+    """差异基因表达热图。
 
+    ``stats`` 传入含 gene / log2FC 的差异表时，输出「热图 + log2FC 条形图 + 组均值折线图」
+    三联版式；不传则只画热图本体。
+    """
     selected = [g for g in genes if g in expr.index][:max_genes]
     if not selected:
         raise ValueError("热图没有可用的差异基因")
@@ -127,25 +130,76 @@ def heatmap_plot(
         color_map = {g: GROUP_COLORS[i % len(GROUP_COLORS)] for i, g in enumerate(unique)}
     else:
         color_map = {}
+    pretty = {"ipf": "IPF", "control": "Control", "ctrl": "Control", "chp": "CHP"}
 
-    fig = plt.figure(figsize=(max(6.5, 0.34 * z.shape[1] + 3.6), max(5.0, 0.16 * z.shape[0] + 3.0)))
-    # 分组色带放在热图上方：样本名是 90° 旋转的，放在下方会被色带压住
-    grid = fig.add_gridspec(
-        2, 2, width_ratios=[0.035, 1], height_ratios=[0.045, 1], wspace=0.03, hspace=0.04
-    )
-    group_ax = fig.add_subplot(grid[0, 1])
-    ax = fig.add_subplot(grid[1, 1])
-    cbar_ax = fig.add_subplot(grid[1, 0])
+    fc_map: dict[str, float] = {}
+    if stats is not None and "gene" in stats.columns:
+        fc_col = "log2FC" if "log2FC" in stats.columns else ("logFC" if "logFC" in stats.columns else None)
+        if fc_col:
+            for g, v in zip(stats["gene"].astype(str), stats[fc_col]):
+                if pd.notna(v):
+                    fc_map[g] = float(v)
+    triple = bool(fc_map)
+    if triple:  # 行按 log2FC 降序，热图呈上红下蓝，条形图与折线单调可读
+        z = z.iloc[sorted(range(len(z.index)), key=lambda i: -fc_map.get(z.index[i], 0.0))]
+
+    if triple:
+        fig = plt.figure(figsize=(12.4, 9.6))
+        grid = fig.add_gridspec(
+            3,
+            3,
+            width_ratios=[1, 1, 0.026],
+            height_ratios=[0.05, 1.66, 1.0],
+            wspace=0.26,
+            hspace=0.40,
+            left=0.142,
+            right=0.952,
+            top=0.938,
+            bottom=0.072,
+        )
+        group_ax = fig.add_subplot(grid[0, 0:2])
+        ax = fig.add_subplot(grid[1, 0:2])
+        cbar_ax = fig.add_subplot(grid[1:, 2])
+        ax_b = fig.add_subplot(grid[2, 0])
+        ax_c = fig.add_subplot(grid[2, 1])
+    else:
+        fig = plt.figure(
+            figsize=(min(max(6.5, 0.34 * z.shape[1] + 3.6), 12.5), max(5.0, 0.16 * z.shape[0] + 3.0))
+        )
+        grid = fig.add_gridspec(
+            2,
+            2,
+            width_ratios=[1, 0.028],
+            height_ratios=[0.045, 1],
+            wspace=0.02,
+            hspace=0.05,
+            left=0.145,
+            right=0.955,
+            top=0.925,
+            bottom=0.06,
+        )
+        group_ax = fig.add_subplot(grid[0, 0])
+        ax = fig.add_subplot(grid[1, 0])
+        cbar_ax = fig.add_subplot(grid[1, 1])
+        ax_b = ax_c = None
 
     im = ax.imshow(z.to_numpy(), aspect="auto", cmap=DIVERGING, vmin=-3, vmax=3, interpolation="nearest")
     ax.set_xticks(range(z.shape[1]))
-    ax.set_xticklabels(z.columns, rotation=90, fontsize=7)
+    if z.shape[1] <= 40:
+        ax.set_xticklabels(z.columns, rotation=90, fontsize=7)
+    else:  # 样本多时只留分组色带，样本名省略
+        ax.set_xticklabels([""] * z.shape[1])
     ax.set_yticks(range(z.shape[0]))
     ax.set_yticklabels(z.index, fontsize=6.5)
-    # pad 让标题浮在分组色带之上，标题左对齐把右上角让给图例
-    ax.set_title(title, fontsize=12, pad=34, loc="left")
+    # 标题画在画布层，避免与上方分组色带抢位置
+    fig.text(0.02, 0.965, title, fontsize=12.5, ha="left", color=PALETTE["text"])
+    ax.set_ylabel("基因", fontsize=9, labelpad=6)
+    if z.shape[1] > 40:
+        ax.set_xlabel("样本（按层次聚类排序，上方色带为分组）", fontsize=9, labelpad=6)
     for spine in ax.spines.values():
         spine.set_visible(False)
+    if triple:
+        ax.set_title("A　Top50 基因表达 z-score 热图（每行按 log2FC 降序）", fontsize=10.5, loc="left", pad=6)
 
     cbar = fig.colorbar(im, cax=cbar_ax)
     cbar.set_label("z-score", fontsize=8)
@@ -162,7 +216,7 @@ def heatmap_plot(
         handles = [plt.Rectangle((0, 0), 1, 1, color=c) for c in color_map.values()]
         group_ax.legend(
             handles,
-            list(color_map.keys()),
+            [pretty.get(str(k).lower(), str(k)) for k in color_map.keys()],
             loc="lower right",
             bbox_to_anchor=(1.0, 1.15),
             ncol=min(len(color_map), 8),
@@ -173,6 +227,53 @@ def heatmap_plot(
             columnspacing=1.0,
             borderaxespad=0.0,
         )
+
+    # ---------- B：各基因 log2FC 水平条形图（行序与热图一致） ----------
+    if triple and ax_b is not None:
+        fc = np.array([fc_map.get(g, np.nan) for g in z.index], dtype=float)
+        ypos = np.arange(len(fc))
+        colors = [PALETTE["up"] if v > 0 else PALETTE["down"] for v in np.nan_to_num(fc)]
+        ax_b.barh(ypos, np.nan_to_num(fc), color=colors, height=0.7, edgecolor="none", alpha=0.9)
+        ax_b.axvline(0, color="#6B7684", lw=0.9)
+        ax_b.set_ylim(len(fc) - 0.5, -0.5)
+        step = max(1, len(fc) // 10)
+        show = list(range(0, len(fc), step))
+        ax_b.set_yticks(show)
+        ax_b.set_yticklabels([z.index[i] for i in show], fontsize=6)
+        ax_b.set_xlabel("log2FC（IPF vs Control）", fontsize=8.5)
+        ax_b.set_title("B　各基因的差异倍数", fontsize=10.5, loc="left", pad=6, color=PALETTE["text"])
+        ax_b.grid(True, axis="x", color=PALETTE["grid"], lw=0.6)
+        ax_b.set_axisbelow(True)
+        for side in ("top", "right"):
+            ax_b.spines[side].set_visible(False)
+
+    # ---------- C：两组平均 z-score 折线 ----------
+    if triple and ax_c is not None and group_labels:
+        xs = np.arange(1, z.shape[0] + 1)
+        key_order = list(color_map.keys())
+        for key in key_order:
+            mask = np.array([lab == key for lab in group_labels])
+            if not mask.any():
+                continue
+            ax_c.plot(
+                xs,
+                z.iloc[:, mask].mean(axis=1).to_numpy(),
+                marker="o",
+                markersize=2.8,
+                linewidth=1.4,
+                color=color_map[key],
+                label=pretty.get(str(key).lower(), str(key)),
+            )
+        ax_c.axhline(0, color="#6B7684", lw=0.8, ls="--", alpha=0.8)
+        ax_c.set_xlabel("基因排名（按 |log2FC| 降序）", fontsize=8.5)
+        ax_c.set_ylabel("组内平均 z-score", fontsize=8.5)
+        ax_c.set_title("C　两组平均表达沿基因的变化", fontsize=10.5, loc="left", pad=6, color=PALETTE["text"])
+        ax_c.legend(fontsize=8, frameon=False, loc="best")
+        ax_c.grid(True, axis="y", color=PALETTE["grid"], lw=0.6)
+        ax_c.set_axisbelow(True)
+        for side in ("top", "right"):
+            ax_c.spines[side].set_visible(False)
+
     return _save(fig, path)
 
 
@@ -482,7 +583,9 @@ def module_trait_plot(module_trait: pd.DataFrame, path: Path) -> Path:
 
 
 def qc_boxplot(expr: pd.DataFrame, path: Path) -> Path:
-    fig, ax = plt.subplots(figsize=(max(6.0, 0.42 * expr.shape[1] + 2.8), 4.3))
+    n = expr.shape[1]
+    # 样本多时宽度封顶，否则 200+ 样本会生成上万像素的横幅图
+    fig, ax = plt.subplots(figsize=(min(max(6.0, 0.42 * n + 2.8), 15.0), 4.3))
     data = [expr[c].to_numpy() for c in expr.columns]
     box = ax.boxplot(data, patch_artist=True, showfliers=False, widths=0.62)
     for i, patch in enumerate(box["boxes"]):
@@ -491,8 +594,15 @@ def qc_boxplot(expr: pd.DataFrame, path: Path) -> Path:
         patch.set_edgecolor("#4A5568")
     for median in box["medians"]:
         median.set_color("#20262E")
-    ax.set_xticks(range(1, expr.shape[1] + 1))
-    ax.set_xticklabels(expr.columns, rotation=90, fontsize=7)
+    ax.set_xticks(range(1, n + 1))
+    if n <= 40:
+        ax.set_xticklabels(expr.columns, rotation=90, fontsize=7)
+    else:  # 密集时每 10 个样本标一次名，避免糊成一团
+        ax.set_xticklabels(
+            [str(c) if i % 10 == 0 else "" for i, c in enumerate(expr.columns)],
+            rotation=90,
+            fontsize=6,
+        )
     ax.set_ylabel("表达值（log2 尺度优先）")
     ax.set_title("样本表达分布", fontsize=12, pad=10)
     ax.grid(True, axis="y", color=PALETTE["grid"], lw=0.6, alpha=0.8)
@@ -502,16 +612,163 @@ def qc_boxplot(expr: pd.DataFrame, path: Path) -> Path:
     return _save(fig, path)
 
 
-def qc_correlation_plot(corr: pd.DataFrame, path: Path) -> Path:
-    fig, ax = plt.subplots(figsize=(max(4.6, 0.36 * corr.shape[0] + 2.4), max(4.2, 0.32 * corr.shape[0] + 2.2)))
-    im = ax.imshow(corr.to_numpy(), cmap=SEQUENTIAL, vmin=float(np.nanmin(corr.to_numpy())), vmax=1.0)
-    ax.set_xticks(range(corr.shape[1]))
-    ax.set_xticklabels(corr.columns, rotation=90, fontsize=6.5)
-    ax.set_yticks(range(corr.shape[0]))
-    ax.set_yticklabels(corr.index, fontsize=6.5)
-    ax.set_title("样本相关性矩阵", fontsize=12, pad=10)
-    cbar = fig.colorbar(im, ax=ax, fraction=0.04, pad=0.02)
+def _as_group_series(groups, columns) -> "pd.Series | None":
+    """把多种形态的分组信息统一成 index=sample、value=group 的字符串 Series。"""
+    if groups is None:
+        return None
+    if isinstance(groups, pd.DataFrame):
+        frame = groups.copy()
+        lookup = {str(c).lower(): c for c in frame.columns}
+        if "group" in lookup:
+            key = lookup.get("sample", frame.columns[0])
+            frame = frame.set_index(key)
+            frame.index = frame.index.astype(str)
+            ser = frame[lookup["group"]]
+        elif frame.shape[1] == 1:
+            ser = frame.iloc[:, 0]
+        else:
+            return None
+    elif isinstance(groups, pd.Series):
+        ser = groups
+    else:
+        return None
+    ser = ser.copy()
+    ser.index = ser.index.astype(str)
+    ser = ser.dropna().astype(str).reindex([str(c) for c in columns])
+    return ser
+
+
+def qc_correlation_plot(corr: pd.DataFrame, path: Path, groups=None) -> Path:
+    """样本相关性：左主图矩阵热图 + 下排组内/组间箱线图与分布直方图。"""
+    corr = corr.copy()
+    corr.index = corr.index.astype(str)
+    corr.columns = corr.columns.astype(str)
+    mat = corr.to_numpy(dtype=float)
+    n = corr.shape[0]
+    series = _as_group_series(groups, corr.columns)
+    uniq: list[str] = []
+    if series is not None and int(series.notna().sum()) == n:
+        uniq = list(dict.fromkeys(series.tolist()))
+
+    fig = plt.figure(figsize=(10.4, 7.8))
+    grid = fig.add_gridspec(
+        2,
+        2,
+        width_ratios=[1.55, 1.0],
+        height_ratios=[1.0, 1.0],
+        left=0.062,
+        right=0.975,
+        top=0.868,
+        bottom=0.098,
+        wspace=0.24,
+        hspace=0.42,
+    )
+    ax_h = fig.add_subplot(grid[:, 0])
+    lo = float(np.nanmin(mat))
+    lo = max(0.0, np.floor(lo * 20) / 20)
+    im = ax_h.imshow(mat, cmap=SEQUENTIAL, vmin=lo, vmax=1.0, interpolation="nearest", aspect="auto")
+    step = max(1, int(round(n / 8)))
+    ticks = list(range(0, n, step))
+    ax_h.set_xticks(ticks)
+    ax_h.set_yticks(ticks)
+    ax_h.set_xticklabels([str(t + 1) for t in ticks], fontsize=7)
+    ax_h.set_yticklabels([str(t + 1) for t in ticks], fontsize=7)
+    ax_h.set_xlabel("样本序号", fontsize=9, labelpad=4)
+    ax_h.set_ylabel("样本序号", fontsize=9, labelpad=4)
+    ax_h.set_title("A　样本间 Pearson 相关系数矩阵", fontsize=11.5, loc="left", pad=10, color=PALETTE["text"])
+    for spine in ax_h.spines.values():
+        spine.set_edgecolor("#9AA5B1")
+        spine.set_linewidth(0.8)
+    cbar = fig.colorbar(im, ax=ax_h, fraction=0.046, pad=0.03)
+    cbar.set_label("Pearson r", fontsize=8.5)
     cbar.ax.tick_params(labelsize=7)
+    cbar.outline.set_edgecolor("#9AA5B1")
+
+    ax_b = fig.add_subplot(grid[0, 1])
+    ax_c = fig.add_subplot(grid[1, 1])
+
+    # ---------- B：组内 / 组间 相关系数分布 ----------
+    display = {"ipf": "IPF", "control": "Control", "ctrl": "Control", "chp": "CHP"}
+    palette_b = ["#2BB3A3", "#5C6BC0", "#F2A03D", "#7B61FF", "#E64B5B"]
+    buckets: list[tuple[str, np.ndarray, str]] = []
+    if len(uniq) >= 2:
+        k = 0
+        for i, ga in enumerate(uniq):
+            for gb in uniq[i:]:
+                ia = series.index[series == ga].tolist()
+                ib = series.index[series == gb].tolist()
+                if not ia or not ib:
+                    continue
+                da = display.get(ga.lower(), ga)
+                db = display.get(gb.lower(), gb)
+                if ga == gb:
+                    sub = corr.loc[ia, ia].to_numpy(dtype=float)
+                    vals = sub[np.triu_indices(len(ia), k=1)]
+                    label = f"{da} 组内"
+                    note = f"(n={len(ia)})"
+                else:
+                    vals = corr.loc[ia, ib].to_numpy(dtype=float).ravel()
+                    label = f"{da} — {db}"
+                    note = f"(n={len(ia) * len(ib)})"
+                buckets.append((f"{label}\n{note}", np.asarray(vals, dtype=float), palette_b[k % len(palette_b)]))
+                k += 1
+    if not buckets:
+        mask = ~np.eye(n, dtype=bool)
+        buckets.append((f"全部样本对\n(n={int(mask.sum() / 2)})", mat[mask], "#2BB3A3"))
+
+    bp = ax_b.boxplot(
+        [b[1] for b in buckets],
+        patch_artist=True,
+        widths=0.55,
+        showfliers=False,
+        medianprops=dict(color=PALETTE["text"], lw=1.4),
+        whiskerprops=dict(color="#6B7684", lw=0.9),
+        capprops=dict(color="#6B7684", lw=0.9),
+    )
+    for patch, bucket in zip(bp["boxes"], buckets):
+        patch.set_facecolor(bucket[2])
+        patch.set_alpha(0.5)
+        patch.set_edgecolor("#4A5568")
+        patch.set_linewidth(0.8)
+    ax_b.set_xticks(range(1, len(buckets) + 1))
+    ax_b.set_xticklabels([b[0] for b in buckets], fontsize=7.5)
+    ax_b.set_ylabel("Pearson r", fontsize=9)
+    ax_b.set_title("B　组内与组间相关性分布", fontsize=11.5, loc="left", pad=8, color=PALETTE["text"])
+    ax_b.grid(True, axis="y", color=PALETTE["grid"], lw=0.7)
+    ax_b.set_axisbelow(True)
+    for side in ("top", "right"):
+        ax_b.spines[side].set_visible(False)
+
+    # ---------- C：相关系数直方图 ----------
+    for label, vals, color in buckets:
+        ax_c.hist(
+            vals,
+            bins=60,
+            histtype="stepfilled",
+            alpha=0.45,
+            color=color,
+            edgecolor=color,
+            linewidth=0.9,
+            label=label.replace("\n", " "),
+        )
+    ax_c.set_xlabel("Pearson r", fontsize=9)
+    ax_c.set_ylabel("样本对数量", fontsize=9)
+    ax_c.set_title("C　相关系数频数分布", fontsize=11.5, loc="left", pad=8, color=PALETTE["text"])
+    ax_c.legend(fontsize=7, frameon=False, loc="upper left")
+    ax_c.grid(True, axis="y", color=PALETTE["grid"], lw=0.7)
+    ax_c.set_axisbelow(True)
+    for side in ("top", "right"):
+        ax_c.spines[side].set_visible(False)
+
+    fig.suptitle(f"样本相关性评估（n = {n} 例）", fontsize=13.5, x=0.062, ha="left", y=0.962, color=PALETTE["text"])
+    fig.text(
+        0.062,
+        0.925,
+        "对角线为样本自身（r = 1）；色块越深表示两个样本的整体表达谱越接近。组内 r 应高于组间 r，否则提示分组建模或批次效应问题。",
+        fontsize=8.2,
+        color="#5A6472",
+        ha="left",
+    )
     return _save(fig, path)
 
 

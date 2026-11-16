@@ -29,8 +29,8 @@ def capture(out_dir: Path, data: str, groups: str | None) -> None:
     window.show()
 
     dataset = load_dataset(data, group_file=groups)
-    window.output_edit.setText(str(Path("OmicsOne_Results").resolve()))
-    window.output_label.setText(str(Path("OmicsOne_Results").resolve()))
+    window.output_edit.setText(str(Path("D:/OmicsOne/Results").as_posix()))
+    window.output_label.setText("D:\\OmicsOne\\Results\\Project_01")
     window._on_dataset_ready(dataset, data, True)
 
     pages = {
@@ -55,7 +55,7 @@ def capture(out_dir: Path, data: str, groups: str | None) -> None:
 if __name__ == "__main__":
     base = Path(__file__).resolve().parent.parent
     capture(
-        base / "shots",
-        str(base / "examples" / "demo_expression_matrix.csv"),
-        str(base / "examples" / "demo_phenotype.csv"),
+        base / "workspace" / "shots",
+        str(base / "workspace" / "demo" / "demo_expression_matrix.csv"),
+        str(base / "workspace" / "demo" / "demo_phenotype.csv"),
     )

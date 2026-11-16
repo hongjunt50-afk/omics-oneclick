@@ -28,6 +28,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--permutations", type=int, default=1000)
     parser.add_argument("--no-wgcna", action="store_true")
     parser.add_argument("--steps", nargs="*", default=None, help="只跑指定步骤：qc deg pca enrichment gsea wgcna")
+    parser.add_argument("--pack", action="store_true", help="分析完成后导出 28 项提交材料包")
+    parser.add_argument("--heatmap-top", type=int, default=50, help="聚类热图取前 N 个差异基因（默认 50）")
     args = parser.parse_args(argv)
 
     def progress(fraction: float, message: str) -> None:
@@ -49,10 +51,18 @@ def main(argv: list[str] | None = None) -> int:
         gsea_library=args.gsea,
         gsea_permutations=args.permutations,
         run_wgcna=not args.no_wgcna,
+        heatmap_top=args.heatmap_top,
+        export_submission=args.pack,
     )
     runner = Runner(dataset, config, progress=progress, log=log)
     result = runner.run_all(args.steps)
     report = build_report(result, dataset, config)
+    if args.pack:
+        from app.core.submission import build_submission_pack
+
+        pack = build_submission_pack(result.project_dir, heatmap_top=args.heatmap_top)
+        print(f"\n提交材料包：{pack.out_dir}")
+        print(pack.summary_line())
     progress(1.0, "完成")
     print(f"\n结果目录：{result.project_dir}")
     print(f"HTML 报告：{report}")
